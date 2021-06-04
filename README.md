@@ -55,7 +55,7 @@ If you find this toolkit helpful to your research, please do consider to cite [o
 ```bash
 git clone https://github.com/s3prl/s3prl.git
 cd s3prl/
-pip install -r requirements.txt
+pip install -r requirements.txt -f https://download.pytorch.org/whl/torch_stable.html
 cd ../
 
 git clone https://github.com/pytorch/fairseq.git
