@@ -12,6 +12,13 @@ from utility.helper import show
 SAMPLE_RATE = 16000
 
 
+def get_upstream_name(upstream):
+    upstream_name = str(upstream.__class__)
+    i = upstream_name.find('.') + 1
+    f = i + upstream_name[i:].find('.')
+    return upstream_name[i:f]
+
+
 class Hook:
     def __init__(self, module_path, transform, unique_identifier=None):
         self.module_path = module_path
@@ -47,7 +54,8 @@ class UpstreamBase(nn.Module, metaclass=initHook):
             hooks: each Tuple is an argument list for the Hook initializer
         """
         super().__init__()
-        self.hooks: List[Hook] = [Hook(*hook) for hook in hooks] if hooks else []
+        self.hooks: List[Hook] = [Hook(*hook)
+                                  for hook in hooks] if hooks else []
         self.hook_postprocess = hook_postprocess
         self._hook_hiddens: List[Tuple(str, Tensor)] = []
 
@@ -88,7 +96,8 @@ class UpstreamBase(nn.Module, metaclass=initHook):
 
         def generate_hook_handler(hiddens: List, hook: Hook):
             def hook_handler(self, input, output):
-                hiddens.append((hook.unique_identifier, hook.transform(input, output)))
+                hiddens.append(
+                    (hook.unique_identifier, hook.transform(input, output)))
 
             return hook_handler
 
@@ -131,7 +140,8 @@ class UpstreamBase(nn.Module, metaclass=initHook):
             if callable(self.hook_postprocess):
                 hook_hiddens = self.hook_postprocess(hook_hiddens)
 
-            result["_hidden_states_info"], result["hidden_states"] = zip(*hook_hiddens)
+            result["_hidden_states_info"], result["hidden_states"] = zip(
+                *hook_hiddens)
             result["last_hidden_state"] = result["hidden_states"][-1]
 
             default = result.get("default")
@@ -151,7 +161,7 @@ class Featurizer(nn.Module):
     ):
         super().__init__()
         self.feature_selection = feature_selection
-        self.name = f"Featurizer for {upstream.__class__}"
+        self.name = f"Featurizer for {get_upstream_name(upstream)}"
 
         show(
             f"[{self.name}] - The input upstream is only for initialization and not saved in this nn.Module"
@@ -170,7 +180,8 @@ class Featurizer(nn.Module):
             show(
                 f"[{self.name}] - Take a list of {self.layer_num} features and weighted sum them."
             )
-            self.weights = nn.Parameter(torch.zeros(self.layer_num))
+            self.weights = nn.Parameter(torch.zeros(
+                self.layer_num, 1, 1, feature[0].size(-1)))
             feature = self._weighted_sum([f.cpu() for f in feature])
         else:
             feature = feature.cpu()
@@ -189,7 +200,8 @@ class Featurizer(nn.Module):
             feature = list(feature.values())
 
         if feature is None:
-            available_options = [key for key in features.keys() if key[0] != "_"]
+            available_options = [
+                key for key in features.keys() if key[0] != "_"]
             show(
                 f"[{self.name}] - feature_selection = {self.feature_selection} is not supported for this upstream.",
                 file=sys.stderr,
@@ -202,24 +214,30 @@ class Featurizer(nn.Module):
         return feature
 
     def _weighted_sum(self, feature):
-        assert self.layer_num == len(feature), f"{self.layer_num} != {len(feature)}"
+        assert self.layer_num == len(
+            feature), f"{self.layer_num} != {len(feature)}"
+        # stacked_feature = torch.stack(feature, dim=0)
+
+        # _, *origin_shape = stacked_feature.shape
+        # stacked_feature = stacked_feature.view(self.layer_num, -1)
+        # norm_weights = F.softmax(self.weights, dim=-1)
+        # weighted_feature = (norm_weights.unsqueeze(-1)
+        #                     * stacked_feature).sum(dim=0)
+        # weighted_feature = weighted_feature.view(*origin_shape)
+
+        # return weighted_feature
         stacked_feature = torch.stack(feature, dim=0)
 
-        _, *origin_shape = stacked_feature.shape
-        stacked_feature = stacked_feature.view(self.layer_num, -1)
         norm_weights = F.softmax(self.weights, dim=-1)
-        weighted_feature = (norm_weights.unsqueeze(-1) * stacked_feature).sum(dim=0)
-        weighted_feature = weighted_feature.view(*origin_shape)
-
-        return weighted_feature
+        return (norm_weights * stacked_feature).sum(dim=0)
 
     def forward(
         self,
         paired_wavs: List[Tensor],
-        paired_features: Dict[str, Union[Tensor, List[Tensor], Dict[str, Tensor]]],
+        paired_features: Dict[str, Union[Tensor, List[Tensor], Tuple[Tensor], Dict[str, Tensor]]],
     ):
         feature = self._select_feature(paired_features)
-        if isinstance(feature, list) or isinstance(feature, tuple):
+        if isinstance(feature, (list, tuple)):
             feature = self._weighted_sum(feature)
 
         return UpstreamBase.tolist(paired_wavs, feature)
