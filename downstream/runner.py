@@ -44,10 +44,12 @@ class Runner():
             self.args.init_ckpt, map_location='cpu') if self.args.init_ckpt else {}
 
         self.upstream = self._get_upstream()
-        self.feature_transformer = self._get_feature_transformer()
         self.featurizer = self._get_featurizer()
         self.downstream = self._get_downstream()
         self.all_entries = [self.upstream, self.featurizer, self.downstream]
+        if self.args.feature_transformer:
+            self.feature_transformer = self._get_feature_transformer()
+            self.all_entries.append(self.feature_transformer)
 
     def _load_weight(self, model, name):
         init_weight = self.init_ckpt.get(name)
@@ -106,12 +108,14 @@ class Runner():
         )
 
     def _get_feature_transformer(self):  # PCA
-        model = PCA(self.upstream.output_dim).to(self.args.device)
+        model = PCA(self.upstream.model, self.args.upstream_feature_selection).to(
+            self.args.device)
 
         return self._init_model(
             model=model,
             name='Feature_Transformer',
-            trainable=False  # TODO: PCA running ver.
+            trainable=False,  # TODO: PCA running ver.
+            interfaces=['output_dim', 'eigen_value']
         )
         # init_feature_transformer = self.init_ckpt.get('Feature_Transformer')
         # if init_feature_transformer:
@@ -126,7 +130,7 @@ class Runner():
         Downstream = getattr(importlib.import_module(
             module_path), 'DownstreamExpert')
         model = Downstream(
-            upstream_dim=self.featurizer.model.output_dim,  # TODO: dim_factor
+            upstream_dim=self.featurizer.model.output_dim // self.args.dim_factor,  # TODO: dim_factor
             upstream_rate=self.featurizer.model.downsample_rate,
             **self.config,
             **vars(self.args)
@@ -136,7 +140,7 @@ class Runner():
             model=model,
             name='Downstream',
             trainable=True,
-            interfaces=['get_dataloader', 'log_records']
+            interfaces=['get_dataloader', 'log_records', 'upstream_dim']
         )
 
     def _get_optimizer(self, model_params):
@@ -208,7 +212,7 @@ class Runner():
                         self.args.device) for wav in wavs]
                     return wavs, self.upstream.model(wavs)
 
-                self.feature_transformer.fit_dataloader(
+                self.feature_transformer.model.fit_dataloader(
                     dataloader, dataprocessor=dataprocessor)
             if self.args.upstream_trainable:
                 self.upstream.model.train()
@@ -235,17 +239,19 @@ class Runner():
                     else:
                         with torch.no_grad():
                             features = self.upstream.model(wavs)
-                    features = self.featurizer.model(wavs, features)
 
                     if self.args.feature_transformer:  # PCA
                         if self.upstream.model.training:
-                            features = self.feature_transformer(features)
+                            features = self.feature_transformer.model(
+                                wavs, features)
                         else:
                             with torch.no_grad():
-                                features = self.feature_transformer(features)
+                                features = self.feature_transformer.model(
+                                    wavs, features)
 
+                    features = self.featurizer.model(wavs, features)
                     # test half feature
-                    features = [f[:, :self.downstream.upstream_dim]
+                    features = [f[:, :self.downstream.model.upstream_dim]
                                 for f in features]
                     if specaug:
                         features, _ = specaug(features)
@@ -352,11 +358,6 @@ class Runner():
                     if is_initialized():
                         all_states['WorldSize'] = get_world_size()
 
-                    # PCA
-                    if self.args.feature_transformer:
-                        all_states['Feature_Transformer'] = get_model_state(
-                            self.feature_transformer)
-
                     save_paths = [os.path.join(self.args.expdir, name)
                                   for name in save_names]
                     tqdm.write(f'[Runner] - Save the checkpoint to:')
@@ -407,11 +408,11 @@ class Runner():
                     for wav in wavs]
             with torch.no_grad():
                 features = self.upstream.model(wavs)
-                features = self.featurizer.model(wavs, features)
                 if self.args.feature_transformer:  # PCA
-                    features = self.feature_transformer(features)
+                    features = self.feature_transformer.model(wavs, features)
+                features = self.featurizer.model(wavs, features)
                 # test half feature
-                features = [f[:, :self.downstream.upstream_dim]
+                features = [f[:, :self.downstream.model.upstream_dim]
                             for f in features]
 
                 self.downstream.model(

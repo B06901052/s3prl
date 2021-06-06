@@ -244,10 +244,10 @@ class PCA(nn.Module):
         self.isfit = True
         return self
 
-    def forward(self, X):
+    def forward(self, wavs, X):
         assert self.isfit, "Does not fit."  # tmp, remember to remove
         if self.track_running_stats and self.training:
-            self._fit_batch(X)
+            self._fit_batch(wavs, X)
         if isinstance(X, Tensor):
             return (X - self.running_mean.squeeze(0)) @ self.basis.squeeze(0)
         elif isinstance(X, List[Tensor]):
