@@ -60,6 +60,13 @@ def get_downstream_args():
 
     # feature transformer settings
     parser.add_argument('-T', '--feature_transformer', action='store_true')
+    parser.add_argument('--feature_transformer_track',
+                        action='store_true')
+    parser.add_argument('--feature_transformer_momentum',
+                        type=float, default=0.1)
+    parser.add_argument('--feature_transformer_rotation',
+                        type=float, default=0.01)
+    parser.add_argument('--feature_transformer_niter', type=int, default=2)
     parser.add_argument('-D', '--dim_factor', type=float, default=1.0)
 
     # upstream settings

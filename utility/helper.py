@@ -10,6 +10,10 @@
 ###############
 # IMPORTATION #
 ###############
+
+
+
+
 import os
 import sys
 import math
@@ -24,49 +28,58 @@ from datetime import datetime
 from collections import defaultdict
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import is_initialized, get_rank, get_world_size
-
 def is_leader_process():
     return not is_initialized() or get_rank() == 0
 
+
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
 
 def count_used_parameters(model):
     # The model should be at least backward once
     return sum(p.numel() for p in model.parameters() if p.grad is not None)
 
+
 def get_time_tag():
     return datetime.fromtimestamp(time()).strftime('%Y-%m-%d-%H-%M-%S')
+
 
 def backup(src_path, tgt_dir):
     stem = Path(src_path).stem
     suffix = Path(src_path).suffix
-    shutil.copyfile(src_path, os.path.join(tgt_dir, f'{stem}_{get_time_tag()}{suffix}'))
+    shutil.copyfile(src_path, os.path.join(
+        tgt_dir, f'{stem}_{get_time_tag()}{suffix}'))
+
 
 def get_model_state(model):
     if isinstance(model, DDP):
         return model.module.state_dict()
     return model.state_dict()
 
+
 def show(*args, **kwargs):
     if is_leader_process():
         print(*args, **kwargs)
 
+
 def hack_isinstance():
     # Pytorch do not support passing a defaultdict into DDP module
     # https://github.com/pytorch/pytorch/blob/v1.7.1/torch/nn/parallel/scatter_gather.py#L19
-    
+
     # This hack can be removed after torch 1.8.0, where when each DDP process use single GPU
     # (which is the best practice) DDP will not pass args, kwargs into scatter function
     # https://github.com/pytorch/pytorch/blob/v1.7.1/torch/nn/parallel/distributed.py#L617
     # https://github.com/pytorch/pytorch/blob/v1.8.0-rc1/torch/nn/parallel/distributed.py#L700
 
     _isinstance = builtins.isinstance
+
     def isinstance(obj, cls):
         if _isinstance(obj, defaultdict):
             return _isinstance(obj, cls) and issubclass(cls, defaultdict)
         return _isinstance(obj, cls)
     builtins.isinstance = isinstance
+
 
 def override(string, args, config):
     """
@@ -93,6 +106,7 @@ def override(string, args, config):
                     target_config.setdefault(field_name, {})
                     target_config = target_config[field_name]
 
+
 def zero_mean_unit_var_norm(input_values: List[np.ndarray]) -> List[np.ndarray]:
     """
     Every array in the list is normalized to have zero mean and unit variance
@@ -104,6 +118,8 @@ def zero_mean_unit_var_norm(input_values: List[np.ndarray]) -> List[np.ndarray]:
 #####################
 # PARSE PRUNE HEADS #
 #####################
+
+
 def parse_prune_heads(config):
     if 'prune_headids' in config['transformer'] and config['transformer']['prune_headids'] != 'None':
         heads_int = []
@@ -113,7 +129,8 @@ def parse_prune_heads(config):
             if len(endpoints) == 1:
                 heads_int.append(int(endpoints[0]))
             elif len(endpoints) == 2:
-                heads_int += torch.arange(int(endpoints[0]), int(endpoints[1])).tolist()
+                heads_int += torch.arange(int(endpoints[0]),
+                                          int(endpoints[1])).tolist()
             else:
                 raise ValueError
         print(f'[PRUNING] - heads {heads_int} will be pruned')
@@ -132,7 +149,7 @@ def get_transformer_tester(from_path='result/result_transformer/libri_sd1337_fml
     all_states = torch.load(from_path, map_location='cpu')
     config = all_states['Settings']['Config']
     paras = all_states['Settings']['Paras']
-    
+
     # handling older checkpoints
     if not hasattr(paras, 'multi_gpu'):
         setattr(paras, 'multi_gpu', False)

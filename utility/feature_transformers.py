@@ -1,11 +1,16 @@
+import os
 import sys
+import numpy as np
+from tqdm import tqdm
+from typeguard import check_type
+
 import torch
 import torch.nn as nn
-from upstream.interfaces import UpstreamBase, SAMPLE_RATE
-from utility.helper import show
-from typing import List, Dict, Tuple, Union
 from torch.tensor import Tensor
-import numpy as np
+
+from typing import Tuple, List, Dict, Union
+from utility.helper import show, is_leader_process
+from upstream.interfaces import UpstreamBase, SAMPLE_RATE, get_upstream_name
 
 
 class PCA(nn.Module):
@@ -23,7 +28,7 @@ class PCA(nn.Module):
         super().__init__()
         """config"""
         self.feature_selection = feature_selection
-        self.name = f"Feature Transformer for {upstream.__class__}"
+        self.name = f"Feature Transformer for {get_upstream_name(upstream)}"
         self.track_running_stats = track_running_stats
         self.niter = niter
 
@@ -43,7 +48,7 @@ class PCA(nn.Module):
         if isinstance(feature, (list, tuple)):
             self.layer_num = len(feature)
             show(
-                f"[{self.name}] - Take a list of {self.layer_num} features and weighted sum them."
+                f"[{self.name}] - Take a list of {self.layer_num} features and do PCA on them."
             )
             feature = feature[0]
         else:
@@ -112,7 +117,7 @@ class PCA(nn.Module):
 
     def _format_feature(self, X):
         # return shape: (batch_size, layer_num, max_seq_len, feat_dim)
-        if isinstance(X, List[Tensor]):
+        if isinstance(X, (list, tuple)) and isinstance(X[0], Tensor):
             X = torch.stack(X)  # .view(self.layer_num, -1, self.output_dim)
         else:
             X = torch.clone(X.unsqueeze(0))
@@ -163,7 +168,8 @@ class PCA(nn.Module):
         # deal with list of tensors
         if isinstance(X, Tensor):
             return X
-        elif isinstance(X, List[Tensor]):
+        else:
+            check_type("List[Tensor]", X, List[Tensor])
             return torch.cat(X, 0)
 
     def _fit_batch(self, paired_wavs, X):
@@ -222,20 +228,32 @@ class PCA(nn.Module):
         return self
 
     def fit_dataloader(self, dataloader, dataprocessor):
+        tqdm_file = sys.stderr if is_leader_process() else open(os.devnull, 'w')
+        show(
+            f"[{self.name}] - Compute mean"
+        )
         # compute mean
-        for data in dataloader:
+        for data in tqdm(dataloader, dynamic_ncols=True, desc='mean', file=tqdm_file):
             wavs, features = dataprocessor(data)
-            feature = self._select_feature(features, self.feature_selection)
+            feature = self._select_feature(features)
             self._accumulate_sum(wavs, feature)
 
         self._calculate_mean()
+
+        show(
+            f"[{self.name}] - Compute covariance"
+        )
         # compute cov
-        for data in dataloader:
-            features = dataprocessor(data)
-            feature = self._select_feature(features, self.feature_selection)
+        for data in tqdm(dataloader, dynamic_ncols=True, desc='cov', file=tqdm_file):
+            wavs, features = dataprocessor(data)
+            feature = self._select_feature(features)
             self._accumulate_cov(wavs, feature)
 
         self._calculate_cov()
+
+        show(
+            f"[{self.name}] - Compute SVD"
+        )
         # compute SVD
         for eigen_value, basis, cov in zip(self.eigen_value, self.basis, self.running_cov):
             _, eigen_value[:], basis[:, :] = torch.svd_lowrank(
@@ -250,17 +268,18 @@ class PCA(nn.Module):
             self._fit_batch(wavs, X)
         if isinstance(X, Tensor):
             return (X - self.running_mean.squeeze(0)) @ self.basis.squeeze(0)
-        elif isinstance(X, List[Tensor]):
+        elif isinstance(X, list) and isinstance(X[0], Tensor):
             return [(x[:, :] - self.running_mean.squeeze(0)) @ self.basis.squeeze(0) for x in X]
-        elif isinstance(X, Dict[str, Union[Tensor, List[Tensor], Dict[str, Tensor]]]):
-            X = self._select_feature(X, self.feature_selection)
+        elif isinstance(X, dict):
+            X = self._select_feature(X)
             if isinstance(X, Tensor):
                 X[:, :, :] = (X - self.running_mean.squeeze(0)
                               ) @ self.basis.squeeze(0)
-            elif isinstance(X, List[Tensor]):
+            elif isinstance(X, (list, tuple)) and isinstance(X[0], Tensor):
                 for i, x in enumerate(X):
                     x[:, :, :] = (x - self.running_mean[i]) @ self.basis[i]
-            elif isinstance(X, Dict[str, Tensor]):
+            else:
+                check_type("Dict[str, Tensor]", X, Dict[str, Tensor])
                 for i, x in enumerate(X.values()):
                     x[:, :, :] = (x - self.running_mean[i]) @ self.basis[i]
 

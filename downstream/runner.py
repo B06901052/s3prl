@@ -18,8 +18,8 @@ import hubconf
 from optimizers import get_optimizer
 from schedulers import get_scheduler
 from upstream.interfaces import Featurizer
-from utility.helper import is_leader_process, get_model_state, show, defaultdict
 from utility.feature_transformers import PCA
+from utility.helper import is_leader_process, get_model_state, show, defaultdict
 SAMPLE_RATE = 16000
 
 
@@ -49,6 +49,24 @@ class Runner():
         self.all_entries = [self.upstream, self.featurizer, self.downstream]
         if self.args.feature_transformer:
             self.feature_transformer = self._get_feature_transformer()
+            # fit dataset
+            if self.feature_transformer.name in self.init_ckpt:
+                self.feature_transformer.model.isfit = True
+            elif not self.args.feature_transformer_track:
+                dataloader = self.downstream.model.get_dataloader('train')
+                self.upstream.model.eval()
+                with torch.no_grad():
+                    def dataprocessor(data):
+                        (wavs, *others) = data
+                        wavs = [torch.FloatTensor(wav).to(
+                            self.args.device) for wav in wavs]
+                        return wavs, self.upstream.model(wavs)
+
+                    self.feature_transformer.model.fit_dataloader(
+                        dataloader, dataprocessor=dataprocessor)
+                if self.args.upstream_trainable:
+                    self.upstream.model.train()
+
             self.all_entries.append(self.feature_transformer)
 
     def _load_weight(self, model, name):
@@ -108,13 +126,21 @@ class Runner():
         )
 
     def _get_feature_transformer(self):  # PCA
-        model = PCA(self.upstream.model, self.args.upstream_feature_selection).to(
+        # TODO: args to config, remember to change all default config QWQ
+        model = PCA(
+            upstream=self.upstream.model,
+            feature_selection=self.args.upstream_feature_selection,
+            track_running_stats=self.args.feature_transformer_track,
+            momentum=self.args.feature_transformer_momentum,
+            rotation=self.args.feature_transformer_rotation,
+            niter=self.args.feature_transformer_niter,
+        ).to(
             self.args.device)
 
         return self._init_model(
             model=model,
             name='Feature_Transformer',
-            trainable=False,  # TODO: PCA running ver.
+            trainable=True,  # TODO: PCA running ver.
             interfaces=['output_dim', 'eigen_value']
         )
         # init_feature_transformer = self.init_ckpt.get('Feature_Transformer')
@@ -130,7 +156,8 @@ class Runner():
         Downstream = getattr(importlib.import_module(
             module_path), 'DownstreamExpert')
         model = Downstream(
-            upstream_dim=self.featurizer.model.output_dim // self.args.dim_factor,  # TODO: dim_factor
+            upstream_dim=int(self.featurizer.model.output_dim /
+                             self.args.dim_factor),  # TODO: dim_factor
             upstream_rate=self.featurizer.model.downsample_rate,
             **self.config,
             **vars(self.args)
@@ -201,21 +228,6 @@ class Runner():
 
         # prepare data
         dataloader = self.downstream.model.get_dataloader('train')
-
-        # set feature transformer # PCA
-        if self.args.feature_transformer and not self.feature_transformer.isfit:
-            self.upstream.model.eval()
-            with torch.no_grad():
-                def dataprocessor(data):
-                    (wavs, *others) = data
-                    wavs = [torch.FloatTensor(wav).to(
-                        self.args.device) for wav in wavs]
-                    return wavs, self.upstream.model(wavs)
-
-                self.feature_transformer.model.fit_dataloader(
-                    dataloader, dataprocessor=dataprocessor)
-            if self.args.upstream_trainable:
-                self.upstream.model.train()
 
         batch_ids = []
         backward_steps = 0
