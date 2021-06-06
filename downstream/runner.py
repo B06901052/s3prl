@@ -19,7 +19,7 @@ from optimizers import get_optimizer
 from schedulers import get_scheduler
 from upstream.interfaces import Featurizer
 from utility.helper import is_leader_process, get_model_state, show, defaultdict
-
+from utility.feature_transformers import PCA
 SAMPLE_RATE = 16000
 
 
@@ -36,23 +36,25 @@ class Runner():
     Used to handle high-level concepts of a ML experiment
     eg. training loop, evaluation loop, upstream propagation, optimization, logging, checkpoint saving
     """
+
     def __init__(self, args, config):
         self.args = args
         self.config = config
-        self.init_ckpt = torch.load(self.args.init_ckpt, map_location='cpu') if self.args.init_ckpt else {}
+        self.init_ckpt = torch.load(
+            self.args.init_ckpt, map_location='cpu') if self.args.init_ckpt else {}
 
         self.upstream = self._get_upstream()
+        self.feature_transformer = self._get_feature_transformer()
         self.featurizer = self._get_featurizer()
         self.downstream = self._get_downstream()
         self.all_entries = [self.upstream, self.featurizer, self.downstream]
 
-
     def _load_weight(self, model, name):
         init_weight = self.init_ckpt.get(name)
         if init_weight:
-            show(f'[Runner] - Loading {name} weights from the previous experiment')
+            show(
+                f'[Runner] - Loading {name} weights from the previous experiment')
             model.load_state_dict(init_weight)
-
 
     def _init_model(self, model, name, trainable, interfaces=None):
         for interface in interfaces or []:
@@ -61,12 +63,12 @@ class Runner():
         self._load_weight(model, name)
 
         if is_initialized() and trainable and any((p.requires_grad for p in model.parameters())):
-            model = DDP(model, device_ids=[self.args.local_rank], find_unused_parameters=True)
+            model = DDP(model, device_ids=[
+                        self.args.local_rank], find_unused_parameters=True)
             for interface in interfaces or []:
                 setattr(model, interface, getattr(model.module, interface))
 
         return ModelEntry(model, name, trainable, interfaces)
-
 
     def _get_upstream(self):
         Upstream = getattr(hubconf, self.args.upstream)
@@ -77,20 +79,19 @@ class Runner():
             upstream_refresh = False
 
         model = Upstream(
-            ckpt = self.args.upstream_ckpt,
-            model_config = self.args.upstream_model_config,
-            refresh = upstream_refresh,
+            ckpt=self.args.upstream_ckpt,
+            model_config=self.args.upstream_model_config,
+            refresh=upstream_refresh,
         ).to(self.args.device)
 
         if is_initialized() and get_rank() == 0:
             torch.distributed.barrier()
 
         return self._init_model(
-            model = model,
-            name = 'Upstream',
-            trainable = self.args.upstream_trainable,
+            model=model,
+            name='Upstream',
+            trainable=self.args.upstream_trainable,
         )
-
 
     def _get_featurizer(self):
         model = Featurizer(
@@ -98,40 +99,54 @@ class Runner():
         ).to(self.args.device)
 
         return self._init_model(
-            model = model,
-            name = 'Featurizer',
-            trainable = True,
-            interfaces = ['output_dim', 'downsample_rate']
+            model=model,
+            name='Featurizer',
+            trainable=True,
+            interfaces=['output_dim', 'downsample_rate']
         )
 
+    def _get_feature_transformer(self):  # PCA
+        model = PCA(self.upstream.output_dim).to(self.args.device)
+
+        return self._init_model(
+            model=model,
+            name='Feature_Transformer',
+            trainable=False  # TODO: PCA running ver.
+        )
+        # init_feature_transformer = self.init_ckpt.get('Feature_Transformer')
+        # if init_feature_transformer:
+        #     show(
+        #         '[Runner] - Loading feature transformer weights from the previous experiment')
+        #     feature_transformer.load_state_dict(init_feature_transformer)
+        #     feature_transformer.isfit = True
+        # return feature_transformer
 
     def _get_downstream(self):
         module_path = f'downstream.{self.args.downstream}.expert'
-        Downstream = getattr(importlib.import_module(module_path), 'DownstreamExpert')
+        Downstream = getattr(importlib.import_module(
+            module_path), 'DownstreamExpert')
         model = Downstream(
-            upstream_dim = self.featurizer.model.output_dim,
-            upstream_rate = self.featurizer.model.downsample_rate,
+            upstream_dim=self.featurizer.model.output_dim,  # TODO: dim_factor
+            upstream_rate=self.featurizer.model.downsample_rate,
             **self.config,
             **vars(self.args)
         ).to(self.args.device)
 
         return self._init_model(
-            model = model,
-            name = 'Downstream',
-            trainable = True,
-            interfaces = ['get_dataloader', 'log_records']
+            model=model,
+            name='Downstream',
+            trainable=True,
+            interfaces=['get_dataloader', 'log_records']
         )
-
 
     def _get_optimizer(self, model_params):
         optimizer = get_optimizer(
-            model_params, 
+            model_params,
             self.config['runner']['total_steps'],
             self.config['optimizer']
         )
         self._load_weight(optimizer, 'Optimizer')
         return optimizer
-
 
     def _get_scheduler(self, optimizer):
         scheduler = get_scheduler(
@@ -141,7 +156,6 @@ class Runner():
         )
         self._load_weight(scheduler, 'Scheduler')
         return scheduler
-
 
     def train(self):
         # trainable parameters and train/eval mode
@@ -171,7 +185,8 @@ class Runner():
 
         # progress bar
         tqdm_file = sys.stderr if is_leader_process() else open(os.devnull, 'w')
-        pbar = tqdm(total=self.config['runner']['total_steps'], dynamic_ncols=True, desc='overall', file=tqdm_file)
+        pbar = tqdm(total=self.config['runner']['total_steps'],
+                    dynamic_ncols=True, desc='overall', file=tqdm_file)
         init_step = self.init_ckpt.get('Step')
         if init_step:
             pbar.n = init_step
@@ -182,6 +197,21 @@ class Runner():
 
         # prepare data
         dataloader = self.downstream.model.get_dataloader('train')
+
+        # set feature transformer # PCA
+        if self.args.feature_transformer and not self.feature_transformer.isfit:
+            self.upstream.model.eval()
+            with torch.no_grad():
+                def dataprocessor(data):
+                    (wavs, *others) = data
+                    wavs = [torch.FloatTensor(wav).to(
+                        self.args.device) for wav in wavs]
+                    return wavs, self.upstream.model(wavs)
+
+                self.feature_transformer.fit_dataloader(
+                    dataloader, dataprocessor=dataprocessor)
+            if self.args.upstream_trainable:
+                self.upstream.model.train()
 
         batch_ids = []
         backward_steps = 0
@@ -198,7 +228,8 @@ class Runner():
                         break
                     global_step = pbar.n + 1
 
-                    wavs = [torch.FloatTensor(wav).to(self.args.device) for wav in wavs]
+                    wavs = [torch.FloatTensor(wav).to(
+                        self.args.device) for wav in wavs]
                     if self.upstream.trainable:
                         features = self.upstream.model(wavs)
                     else:
@@ -206,23 +237,35 @@ class Runner():
                             features = self.upstream.model(wavs)
                     features = self.featurizer.model(wavs, features)
 
+                    if self.args.feature_transformer:  # PCA
+                        if self.upstream.model.training:
+                            features = self.feature_transformer(features)
+                        else:
+                            with torch.no_grad():
+                                features = self.feature_transformer(features)
+
+                    # test half feature
+                    features = [f[:, :self.downstream.upstream_dim]
+                                for f in features]
                     if specaug:
                         features, _ = specaug(features)
 
                     loss = self.downstream.model(
                         'train',
                         features, *others,
-                        records = records,
+                        records=records,
                     )
                     batch_ids.append(batch_id)
 
-                    gradient_accumulate_steps = self.config['runner'].get('gradient_accumulate_steps')
+                    gradient_accumulate_steps = self.config['runner'].get(
+                        'gradient_accumulate_steps')
                     (loss / gradient_accumulate_steps).backward()
                     del loss
 
                 except RuntimeError as e:
                     if 'CUDA out of memory' in str(e):
-                        print(f'[Runner] - CUDA out of memory at step {global_step}')
+                        print(
+                            f'[Runner] - CUDA out of memory at step {global_step}')
                         if is_initialized():
                             raise
                         with torch.cuda.device(self.args.device):
@@ -261,11 +304,11 @@ class Runner():
                 if global_step % self.config['runner']['log_step'] == 0:
                     self.downstream.model.log_records(
                         'train',
-                        records = records,
-                        logger = logger,
-                        global_step = global_step,
-                        batch_ids = batch_ids,
-                        total_batch_num = len(dataloader),
+                        records=records,
+                        logger=logger,
+                        global_step=global_step,
+                        batch_ids=batch_ids,
+                        total_batch_num=len(dataloader),
                     )
                     batch_ids = []
                     records = defaultdict(list)
@@ -282,7 +325,8 @@ class Runner():
                         max_keep = self.config['runner']['max_keep']
                         ckpt_pths = glob.glob(f'{directory}/states-*.ckpt')
                         if len(ckpt_pths) >= max_keep:
-                            ckpt_pths = sorted(ckpt_pths, key=lambda pth: int(pth.split('-')[-1].split('.')[0]))
+                            ckpt_pths = sorted(ckpt_pths, key=lambda pth: int(
+                                pth.split('-')[-1].split('.')[0]))
                             for ckpt_pth in ckpt_pths[:len(ckpt_pths) - max_keep + 1]:
                                 os.remove(ckpt_pth)
                     check_ckpt_num(self.args.expdir)
@@ -299,7 +343,8 @@ class Runner():
 
                     for entry in self.all_entries:
                         if entry.trainable:
-                            all_states[entry.name] = get_model_state(entry.model)
+                            all_states[entry.name] = get_model_state(
+                                entry.model)
 
                     if scheduler:
                         all_states['Scheduler'] = scheduler.state_dict()
@@ -307,7 +352,13 @@ class Runner():
                     if is_initialized():
                         all_states['WorldSize'] = get_world_size()
 
-                    save_paths = [os.path.join(self.args.expdir, name) for name in save_names]
+                    # PCA
+                    if self.args.feature_transformer:
+                        all_states['Feature_Transformer'] = get_model_state(
+                            self.feature_transformer)
+
+                    save_paths = [os.path.join(self.args.expdir, name)
+                                  for name in save_names]
                     tqdm.write(f'[Runner] - Save the checkpoint to:')
                     for i, path in enumerate(save_paths):
                         tqdm.write(f'{i + 1}. {path}')
@@ -320,7 +371,6 @@ class Runner():
         if is_leader_process():
             logger.close()
 
-
     def evaluate(self, split=None, logger=None, global_step=0):
         """evaluate function will always be called on a single process even during distributed training"""
 
@@ -331,7 +381,7 @@ class Runner():
             tempdir = tempfile.mkdtemp()
             logger = SummaryWriter(tempdir)
 
-        # fix seed to guarantee the same evaluation protocol across steps 
+        # fix seed to guarantee the same evaluation protocol across steps
         random.seed(self.args.seed)
         np.random.seed(self.args.seed)
         torch.manual_seed(self.args.seed)
@@ -353,24 +403,31 @@ class Runner():
         records = defaultdict(list)
         for batch_id, (wavs, *others) in enumerate(tqdm(dataloader, dynamic_ncols=True, desc=split)):
 
-            wavs = [torch.FloatTensor(wav).to(self.args.device) for wav in wavs]
+            wavs = [torch.FloatTensor(wav).to(self.args.device)
+                    for wav in wavs]
             with torch.no_grad():
                 features = self.upstream.model(wavs)
                 features = self.featurizer.model(wavs, features)
+                if self.args.feature_transformer:  # PCA
+                    features = self.feature_transformer(features)
+                # test half feature
+                features = [f[:, :self.downstream.upstream_dim]
+                            for f in features]
+
                 self.downstream.model(
                     split,
                     features, *others,
-                    records = records,
+                    records=records,
                 )
                 batch_ids.append(batch_id)
 
         save_names = self.downstream.model.log_records(
             split,
-            records = records,
-            logger = logger,
-            global_step = global_step,
-            batch_ids = batch_ids,
-            total_batch_num = len(dataloader),
+            records=records,
+            logger=logger,
+            global_step=global_step,
+            batch_ids=batch_ids,
+            total_batch_num=len(dataloader),
         )
         batch_ids = []
         records = defaultdict(list)
