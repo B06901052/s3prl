@@ -334,6 +334,15 @@ class Runner():
                 # evaluation and save checkpoint
                 save_names = []
 
+                # EXP: monite weight of featurizer
+                if global_step % self.config['runner']['log_step'] == 0 and \
+                        self.featurizer.trainable and \
+                        self.config['featurizer']['log']:
+                    state = get_model_state(self.featurizer.model)
+                    torch.save(state, os.path.join(self.args.expdir,
+                               "featurizer-{}.ckpt".format(global_step)))
+                # EXP END
+
                 if global_step % self.config['runner']['eval_step'] == 0:
                     for split in self.config['runner']['eval_dataloaders']:
                         save_names += self.evaluate(split, logger, global_step)
