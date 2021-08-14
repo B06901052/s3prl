@@ -3,6 +3,7 @@ import sys
 import numpy as np
 from tqdm import tqdm
 from typeguard import check_type
+from bisect import bisect_left
 
 import torch
 import torch.nn as nn
@@ -23,6 +24,8 @@ class PCA(nn.Module):
             momentum: int = 0.1,
             rotation: int = 0.01,
             niter: int = 2,
+            step_mode: str = "None",
+            explained_variation_step_ratio: list = [],
             **kwargs,
     ):
         super().__init__()
@@ -31,6 +34,11 @@ class PCA(nn.Module):
         self.name = f"Feature Transformer for {get_upstream_name(upstream)}"
         self.track_running_stats = track_running_stats
         self.niter = niter
+        self.step_mode = step_mode
+        if step_mode == "Equal":
+            self.explained_variation_step_ratio = explained_variation_step_ratio
+        elif step_mode == "None":
+            self.explained_variation_step_ratio = None
 
         show(
             f"[{self.name}] - The input upstream is only for initialization and not saved in this nn.Module"
@@ -62,6 +70,8 @@ class PCA(nn.Module):
         self.register_buffer('basis',
                              torch.stack([torch.eye(self.output_dim)] * self.layer_num))
         self.register_buffer('eigen_value',
+                             torch.zeros(self.layer_num, self.output_dim))
+        self.register_buffer('explained_variation',
                              torch.zeros(self.layer_num, self.output_dim))
         self.register_buffer('num_inputs_tracked',
                              torch.tensor(0, dtype=torch.long))
@@ -260,28 +270,52 @@ class PCA(nn.Module):
                 cov, q=self.running_cov.size(-1))
 
         self.isfit = True
+        # compute explained variation
+        if self.step_mode == "Equal":
+            self.explained_variation = self.eigen_value.cumsum(dim=1)
+            self.explained_variation /= self.explained_variation[:, -1].view(
+                1, -1)
         return self
 
-    def forward(self, wavs, X):
+    def forward(self, wavs, X, progress_ratio):
         assert self.isfit, "Does not fit."  # tmp, remember to remove
+        exp_ratio = self.explained_variation_step_ratio[int(
+            progress_ratio * len(self.explained_variation_step_ratio))]
         if self.track_running_stats and self.training:
             self._fit_batch(wavs, X)
         if isinstance(X, Tensor):
-            return (X - self.running_mean.squeeze(0)) @ self.basis.squeeze(0)
+            tmp = (X - self.running_mean.squeeze(0)) @ self.basis.squeeze(0)
+            if self.step_mode == "Equal":
+                tmp[:, :, exp_ratio:] = 0
+            return tmp
         elif isinstance(X, list) and isinstance(X[0], Tensor):
-            return [(x[:, :] - self.running_mean.squeeze(0)) @ self.basis.squeeze(0) for x in X]
+            tmp = [(x[:, :] - self.running_mean.squeeze(0))
+                   @ self.basis.squeeze(0) for x in X]
+            if self.step_mode == "Equal":
+                for i in range(len(tmp)):
+                    tmp[i][:, exp_ratio:] = 0
+            return tmp
+
         elif isinstance(X, dict):
             X = self._select_feature(X)
             if isinstance(X, Tensor):
+                # batch_size, time, feature_dim
                 X[:, :, :] = (X - self.running_mean.squeeze(0)
                               ) @ self.basis.squeeze(0)
+                if self.step_mode == "Equal":
+                    X[:, :, exp_ratio:] = 0
+
             elif isinstance(X, (list, tuple)) and isinstance(X[0], Tensor):
                 for i, x in enumerate(X):
                     x[:, :, :] = (x - self.running_mean[i]) @ self.basis[i]
+                    if self.step_mode == "Equal":
+                        x[:, :, exp_ratio:] = 0
             else:
                 check_type("Dict[str, Tensor]", X, Dict[str, Tensor])
                 for i, x in enumerate(X.values()):
                     x[:, :, :] = (x - self.running_mean[i]) @ self.basis[i]
+                    if self.step_mode == "Equal":
+                        x[:, :, exp_ratio:] = 0
 
             return {self.feature_selection: X}
 

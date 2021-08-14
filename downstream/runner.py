@@ -134,6 +134,8 @@ class Runner():
             momentum=self.args.feature_transformer_momentum,
             rotation=self.args.feature_transformer_rotation,
             niter=self.args.feature_transformer_niter,
+            step_mode=self.config['data_transformer']['step_mode'],
+            explained_variation_step_ratio=self.config['data_transformer']['explained_variation_step_ratio'],
         ).to(
             self.args.device)
 
@@ -253,13 +255,15 @@ class Runner():
                             features = self.upstream.model(wavs)
 
                     if self.args.feature_transformer:  # PCA
+                        progress_ratio = global_step / \
+                            self.config['runner']['total_steps']
                         if self.upstream.model.training:
                             features = self.feature_transformer.model(
-                                wavs, features)
+                                wavs, features, progress_ratio)
                         else:
                             with torch.no_grad():
                                 features = self.feature_transformer.model(
-                                    wavs, features)
+                                    wavs, features, progress_ratio)
 
                     features = self.featurizer.model(wavs, features)
                     # test half feature
@@ -430,7 +434,10 @@ class Runner():
             with torch.no_grad():
                 features = self.upstream.model(wavs)
                 if self.args.feature_transformer:  # PCA
-                    features = self.feature_transformer.model(wavs, features)
+                    progress_ratio = global_step / \
+                        self.config['runner']['total_steps']
+                    features = self.feature_transformer.model(
+                        wavs, features, progress_ratio)
                 features = self.featurizer.model(wavs, features)
                 # test half feature
                 features = [f[:, :self.downstream.model.upstream_dim]
