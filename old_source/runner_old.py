@@ -21,7 +21,7 @@ from optimizers import get_optimizer
 from schedulers import get_scheduler
 from utility.helper import is_leader_process, count_parameters, get_model_state, show, defaultdict
 
-from utility.feature_transformers import PCA
+from utility.datatransformers import PCA
 
 SAMPLE_RATE = 16000
 
@@ -37,7 +37,7 @@ class Runner():
 
         self.init_ckpt = torch.load(self.args.init_ckpt, map_location='cpu') if self.args.init_ckpt else {}
         self.upstream = self._get_upstream()
-        self.feature_transformer = self._get_feature_transformer()
+        self.datatransformer = self._get_datatransformer()
         self.downstream = self._get_downstream()
 
 
@@ -82,15 +82,8 @@ class Runner():
 
         return upstream
 
-    def _get_feature_transformer(self):# PCA
-        feature_transformer = PCA(self.upstream.get_output_dim())
-        
-        init_feature_transformer = self.init_ckpt.get('Feature_Transformer')
-        if init_feature_transformer:
-            show('[Runner] - Loading feature transformer weights from the previous experiment')
-            feature_transformer.load_state_dict(init_feature_transformer)
-            feature_transformer.isfit = True
-        return feature_transformer.to(self.args.device)
+    def _get_datatransformer(self):
+        return PCA(device=self.args.device)
 
     def _get_downstream(self):
         module_path = f'downstream.{self.args.downstream}.expert'
@@ -190,7 +183,7 @@ class Runner():
         dataloader = self.downstream.get_dataloader('train')
         
         # PCA
-        if self.args.feature_transformer and not self.feature_transformer.isfit:
+        if self.args.feature_transformer:
             self.upstream.eval()
             with torch.no_grad():
                 def dataprocessor(wavs):
@@ -198,7 +191,7 @@ class Runner():
                     wavs = [torch.FloatTensor(wav).to(self.args.device) for wav in wavs]
                     return self.upstream(wavs)
                         
-                self.feature_transformer.fit_dataloader(dataloader, dataprocessor=dataprocessor)
+                self.datatransformer.fit_dataloader(dataloader, dataprocessor=dataprocessor)
             if self.args.upstream_trainable:
                 self.upstream.train()
             
@@ -225,12 +218,9 @@ class Runner():
                         with torch.no_grad():
                             features = self.upstream(wavs)
                     
-                    if self.args.feature_transformer: # PCA
-                        if self.upstream.training:
-                            features = self.feature_transformer(features)
-                        else:
-                            with torch.no_grad():
-                                features = self.feature_transformer(features)
+                    if self.args.feature_transformer: #PCA
+                        with torch.no_grad():
+                            features = self.datatransformer.transform(features)
 
                     #test half feature
                     features = [f[:, :self.downstream.upstream_dim] for f in features]
@@ -336,11 +326,6 @@ class Runner():
 
                     if is_initialized():
                         all_states['WorldSize'] = get_world_size()
-                        
-                    # PCA
-                    if self.args.feature_transformer:
-                        all_states['Feature_Transformer'] = get_model_state(self.feature_transformer)
-                        
 
                     save_paths = [os.path.join(self.args.expdir, name) for name in save_names]
                     tqdm.write(f'[Runner] - Save the checkpoint to:')
@@ -392,7 +377,7 @@ class Runner():
             with torch.no_grad():
                 features = self.upstream(wavs)
                 if self.args.feature_transformer: #PCA
-                    features = self.feature_transformer(features)
+                    features = self.datatransformer.transform(features)
                 #test half feature
                 features = [f[:, :self.downstream.upstream_dim] for f in features]
            

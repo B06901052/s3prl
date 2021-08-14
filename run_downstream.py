@@ -49,6 +49,10 @@ def get_downstream_args():
         Please check downstream/README.md for details'
     )
     parser.add_argument('-v', '--downstream_variant', help='Downstream vairants given the same expert')
+    
+    # dataprocessor settings
+    parser.add_argument('-T', '--feature_transformer', action='store_true')
+    parser.add_argument('-D', '--dim_factor', type=float, default=1.0)
 
     # upstream settings
     upstreams = [attr for attr in dir(hubconf) if callable(getattr(hubconf, attr)) and attr[0] != '_']
