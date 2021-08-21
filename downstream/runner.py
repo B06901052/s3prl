@@ -22,8 +22,6 @@ from utility.feature_transformers import PCA
 from utility.helper import is_leader_process, get_model_state, show, defaultdict
 SAMPLE_RATE = 16000
 
-from pdb import set_trace #mod
-
 
 class ModelEntry:
     def __init__(self, model, name, trainable, interfaces):
@@ -64,8 +62,11 @@ class Runner():
                             self.args.device) for wav in wavs]
                         return wavs, self.upstream.model(wavs)
 
-                    self.feature_transformer.model.fit_dataloader(
-                        dataloader, dataprocessor=dataprocessor)
+                    if self.config["feature-transformer"]["debug"]:
+                        pass
+                    else:
+                        self.feature_transformer.model.fit_dataloader(
+                            dataloader, dataprocessor=dataprocessor)
                 if self.args.upstream_trainable:
                     self.upstream.model.train()
 
@@ -136,8 +137,7 @@ class Runner():
             momentum=self.args.feature_transformer_momentum,
             rotation=self.args.feature_transformer_rotation,
             niter=self.args.feature_transformer_niter,
-            step_mode=self.config['data_transformer']['step_mode'],
-            explained_variation_step_ratio=self.config['data_transformer']['explained_variation_step_ratio'],
+            config=self.config['feature-transformer']['config'],
         ).to(
             self.args.device)
 
@@ -247,7 +247,6 @@ class Runner():
                     if pbar.n >= pbar.total:
                         break
                     global_step = pbar.n + 1
-                    set_trace() #mod
                     wavs = [torch.FloatTensor(wav).to(
                         self.args.device) for wav in wavs]
                     if self.upstream.trainable:

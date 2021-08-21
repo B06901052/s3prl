@@ -12,7 +12,7 @@ from torch.tensor import Tensor
 from typing import Tuple, List, Dict, Union
 from utility.helper import show, is_leader_process
 from upstream.interfaces import UpstreamBase, SAMPLE_RATE, get_upstream_name
-from pdb import set_trace #mod
+
 
 class PCA(nn.Module):
     def __init__(
@@ -24,8 +24,12 @@ class PCA(nn.Module):
             momentum: int = 0.1,
             rotation: int = 0.01,
             niter: int = 2,
-            step_mode: str = "None",
-            explained_variation_step_ratio: list = [],
+            config: dict = {
+                "step_mode": "None",
+                "ratios": [],
+                "criterion_type": "EV_ratio",
+                "finish_step_ratio": 1.0,
+            },
             **kwargs,
     ):
         super().__init__()
@@ -34,11 +38,8 @@ class PCA(nn.Module):
         self.name = f"Feature Transformer for {get_upstream_name(upstream)}"
         self.track_running_stats = track_running_stats
         self.niter = niter
-        self.step_mode = step_mode
-        if step_mode == "Equal":
-            self.explained_variation_step_ratio = explained_variation_step_ratio
-        elif step_mode == "None":
-            self.explained_variation_step_ratio = None
+        """Learning-by-Guidance"""
+        self.config = config
 
         show(
             f"[{self.name}] - The input upstream is only for initialization and not saved in this nn.Module"
@@ -71,8 +72,12 @@ class PCA(nn.Module):
                              torch.stack([torch.eye(self.output_dim)] * self.layer_num))
         self.register_buffer('eigen_value',
                              torch.zeros(self.layer_num, self.output_dim))
-        self.register_buffer('explained_variation',
-                             torch.zeros(self.layer_num, self.output_dim))
+        if config["criterion_type"] == "EV_ratio":
+            self.register_buffer('criterion',
+                                 torch.zeros(self.layer_num, self.output_dim))
+        elif config["criterion_type"] == "Dim_ratio":
+            self.register_buffer('criterion',
+                                 torch.linspace(0, 1, self.output_dim))
         self.register_buffer('num_inputs_tracked',
                              torch.tensor(0, dtype=torch.long))
 
@@ -271,28 +276,30 @@ class PCA(nn.Module):
 
         self.isfit = True
         # compute explained variation
-        self.explained_variation = self.eigen_value.cumsum(dim=1)
-        self.explained_variation /= self.explained_variation[:, -1].clone().view(
-            1, -1)
+        if self.config["criterion_type"] == "EV_ratio":
+            self.criterion = self.eigen_value.cumsum(dim=1)
+            self.criterion /= self.criterion[:, -1].clone().view(
+                1, -1)
+
         return self
 
     def forward(self, wavs, X, progress_ratio):
-        assert self.isfit, "Does not fit."  # tmp, remember to remove
-        set_trace() #mod
-        if self.step_mode == "Equal":
-            exp_ratio = self.explained_variation_step_ratio[min(len(self.explained_variation_step_ratio) - 1, int(progress_ratio * len(self.explained_variation_step_ratio)))]
-        elif self.step_mode == "Equal":
-            exp_ratio = 1
+        # assert self.isfit, "Does not fit."  # tmp, remember to remove
+        if self.config["step_mode"] == "Equal":
+            ratio = self.config["ratios"][min(len(
+                self.config["ratios"]) - 1, int(progress_ratio * len(self.config["ratios"]) / self.config["finish_step_ratio"]))]
+        elif self.config["step_mode"] == "None":
+            ratio = 1
 
         if self.track_running_stats and self.training:
             self._fit_batch(wavs, X)
         if isinstance(X, Tensor):
             tmp = (X - self.running_mean.squeeze(0)) @ self.basis.squeeze(0)
-            return torch.where(self.explained_variation <= exp_ratio, tmp, torch.cuda.FloatTensor([0]))
+            return torch.where(self.criterion <= ratio, tmp, torch.cuda.FloatTensor([0]))
         elif isinstance(X, list) and isinstance(X[0], Tensor):
             # tmp = [(x[:, :] - self.running_mean.squeeze(0))
             #        @ self.basis.squeeze(0) for x in X]
-            tmp = [torch.where(self.explained_variation <= exp_ratio, (x[:, :] -
+            tmp = [torch.where(self.criterion <= ratio, (x[:, :] -
                                self.running_mean.squeeze(0)) @ self.basis.squeeze(0), torch.cuda.FloatTensor([0])) for x in X]
 
             return tmp
@@ -304,19 +311,18 @@ class PCA(nn.Module):
                 X[:, :, :] = (X - self.running_mean.squeeze(0)
                               ) @ self.basis.squeeze(0)
                 X[:, :, :] = torch.where(
-                    self.explained_variation <= exp_ratio, X, torch.cuda.FloatTensor([0]))
+                    self.criterion <= ratio, X, torch.cuda.FloatTensor([0]))
 
-            elif isinstance(X, (list, tuple)) and isinstance(X[0], Tensor):
-                for i, x in enumerate(X):
-                    x[:, :, :] = (x - self.running_mean[i]) @ self.basis[i]
-                    x[:, :, :] = torch.where(
-                        self.explained_variation <= exp_ratio, x, torch.cuda.FloatTensor([0]))
             else:
-                check_type("Dict[str, Tensor]", X, Dict[str, Tensor])
-                for i, x in enumerate(X.values()):
+                if isinstance(X, (list, tuple)) and isinstance(X[0], Tensor):
+                    enumerater = enumerate(X)
+                else:
+                    check_type("Dict[str, Tensor]", X, Dict[str, Tensor])
+                    enumerater = enumerate(X.values())
+                for i, x in enumerater:
                     x[:, :, :] = (x - self.running_mean[i]) @ self.basis[i]
                     x[:, :, :] = torch.where(
-                        self.explained_variation <= exp_ratio, x, torch.cuda.FloatTensor([0]))
+                        self.criterion <= ratio, x, torch.cuda.FloatTensor([0]))
 
             return {self.feature_selection: X}
 
