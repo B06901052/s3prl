@@ -149,6 +149,7 @@ class Runner():
 
         model = Upstream(
             ckpt = ckpt_path,
+            upstream_feature_selection = self.args.upstream_feature_selection,
             model_config = self.args.upstream_model_config,
             refresh = upstream_refresh,
         ).to(self.args.device)
@@ -436,7 +437,7 @@ class Runner():
 
         # prepare data
         dataloader = self.downstream.model.get_dataloader(split)
-        evaluate_ratio = float(self.config["runner"].get("evaluate_ratio", 1))
+        evaluate_ratio = float(self.config.get("runner", {}).get("evaluate_ratio", 1))
         evaluate_steps = round(len(dataloader) * evaluate_ratio)
 
         batch_ids = []
